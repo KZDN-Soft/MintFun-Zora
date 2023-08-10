@@ -80,80 +80,93 @@ def wait_for_gas_price_to_decrease(node_url, desired_gas_price):
         print(f"Current base fee ({current_base_fee} Gwei) is higher than desired ({desired_gas_price} Gwei). Waiting...")
         time.sleep(10)
 
-# Function to bridge (transfer) tokens
+
 def bridge(config, private_key):
-    # Initialize Web3 and get account details from private key
+    # Initialize a connection to the Ethereum network.
     w3 = Web3(HTTPProvider(config['networks']['Ethereum']['url']))
+
+    # Derive the account from the given private key.
     account = w3.eth.account.from_key(private_key)
     address_checksum = w3.to_checksum_address(account.address)
 
-    # Contract details from the config
+    # Define the contract details from the provided config.
     contract_name = "ZoraBridge"
     contract_details = config['contracts'][contract_name]
     contract_address = w3.to_checksum_address(contract_details['address'])
     contract = w3.eth.contract(address=contract_address, abi=contract_details['abi'])
 
-    # Fetch balance of the account
+    # Calculate the balance of the account and determine half of it.
     balance = w3.eth.get_balance(address_checksum)
-    half_balance = round(balance/2)
+    half_balance = balance // 2  # Using integer division for accuracy.
+
+    # Fetch the current base fee from the Ethereum network.
     base_fee = w3.eth.fee_history(w3.eth.get_block_number(), 'latest')['baseFeePerGas'][-1]
     priority_max = w3.to_wei(1.5, 'gwei')
 
-    # Create a mock (fake) transaction to estimate gas
-    fake_trx = contract.functions.depositTransaction(address, half_balance, 100000, False, b'').build_transaction({
-        'from': address,
+    # Build a fake transaction to estimate the gas required for the real transaction.
+    fake_trx = contract.functions.depositTransaction(
+        address_checksum, half_balance, 100000, False, b''
+    ).build_transaction({
+        'from': address_checksum,
         'value': half_balance,
         'nonce': w3.eth.get_transaction_count(account.address)
     })
 
-    # Update transaction details
-    fake_trx.update({'maxFeePerGas': base_fee + priority_max})
-    fake_trx.update({'maxPriorityFeePerGas': priority_max})
-    gas = w3.eth.estimate_gas(fake_trx)
-    gustavo = gas * (base_fee + priority_max)
+    # Update the gas fees for the fake transaction.
+    fake_trx.update({
+        'maxFeePerGas': base_fee + priority_max,
+        'maxPriorityFeePerGas': priority_max
+    })
 
-    # Calculate the amount of tokens to send based on balance and gas cost
+    # Estimate the gas required using the fake transaction.
+    gas = w3.eth.estimate_gas(fake_trx)
+    gas_cost = gas * (base_fee + priority_max)
+
+    # If send_all_token is True, check if the balance can cover the gas costs.
     if send_all_token:
-        if balance > gustavo:
-            value_wei = round(balance - 1.3 * gustavo)
+        balance = w3.eth.get_balance(address_checksum)
+        if balance > gas_cost:
+            value_wei = round(balance - 1.3 * gas_cost)
             value = w3.from_wei(value_wei, 'ether')
         else:
-            print(f"Insufficient balance to cover gas costs. Balance: {balance}, Gas Cost: {gustavo}")
+            print(f"Insufficient balance to cover gas costs. Balance: {balance}, Gas Cost: {gas_cost}")
             return 0
     else:
         value = random.uniform(value_from, value_to)
         value_wei = w3.to_wei(value, 'ether')
 
-    # Building the actual transaction
-    swap_txn = contract.functions.depositTransaction(address, value_wei, 100000, False, b'').build_transaction({
-        'from': address,
+    # Build the real transaction for depositing funds.
+    swap_txn = contract.functions.depositTransaction(
+        address_checksum, value_wei, 100000, False, b''
+    ).build_transaction({
+        'from': address_checksum,
         'value': value_wei,
         'nonce': w3.eth.get_transaction_count(account.address)
     })
 
-    # Update transaction details
-    swap_txn.update({'maxFeePerGas': base_fee + priority_max})
-    swap_txn.update({'maxPriorityFeePerGas': priority_max})
-    gasLimit = round(w3.eth.estimate_gas(swap_txn) * 1.15)
-    swap_txn.update({'gas': gasLimit})
+    # Update the gas fees and gas limit for the real transaction.
+    swap_txn.update({
+        'maxFeePerGas': base_fee + priority_max,
+        'maxPriorityFeePerGas': priority_max,
+        'gas': round(w3.eth.estimate_gas(swap_txn) * 1.15)
+    })
 
-    # Sign the transaction using the private key
+    # Sign the transaction using the provided private key.
     signed_txn = w3.eth.account.sign_transaction(swap_txn, private_key)
 
-    # Sending the signed transaction
+    # Send the transaction to the Ethereum network and wait for a receipt.
     try:
         txn_hash = w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         txn_receipt = w3.eth.wait_for_transaction_receipt(txn_hash, timeout=666)
-    except (ValueError, Exception) as e:
-        print("Error:", e)
-        print("Insufficient funds for transaction or other error.")
+    except (ValueError, Exception):  # Multiple exceptions can be caught using parentheses.
+        print("Insufficient funds for transaction or other errors.")
         with open('failed_transactions.txt', 'a') as f:
             f.write(f'{address_checksum}, transaction failed due to error\n')
         return 0
 
-    # Check if the transaction was successful and log accordingly
+    # Check the transaction status and log the result.
     if txn_receipt['status'] == 1:
-        print(f"Transaction out of ETH was successful, value = {value}")
+        print(f"Transaction was successful, value = {value}")
         print(f"Wallet {address_checksum}")
         print(f"Txn hash: https://etherscan.io/tx/{txn_hash.hex()}")
         with open('successful_transactions.txt', 'a') as f:
